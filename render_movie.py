@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
 """
-Render SAME_SEED.fountain as a narrated YouTube-ready MP4.
+SAME SEED narrated screenplay renderer.
 
-Pipeline:
-1. Parse the Fountain screenplay into narration/dialogue segments.
-2. Synthesize each segment with edge-tts using different character voices.
-3. Probe durations with ffprobe and build a timed SRT.
-4. Concatenate the speech into one AAC soundtrack with ffmpeg.
-5. Render a 1920x1080 H.264/AAC MP4 with burned subtitles.
+Reads SAME_SEED.fountain, gives characters separate edge-tts voices, narrates
+action text, creates SRT subtitles, and renders a 1080p H.264/AAC MP4.
 
-Requirements:
-    pip install edge-tts pillow
-    ffmpeg + ffprobe available on PATH
+Install:
+    python -m pip install -r requirements-render.txt
+    # also install ffmpeg so ffmpeg + ffprobe are on PATH
 
-Examples:
+Try a preview:
+    python render_movie.py --preview 40 --output same_seed_preview.mp4
+
+Full render:
     python render_movie.py
-    python render_movie.py --preview 40
-    python render_movie.py --force
 """
 
 from __future__ import annotations
@@ -30,7 +27,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -44,15 +41,11 @@ try:
 except ImportError:
     Image = ImageDraw = ImageFont = None
 
-
 ROOT = Path(__file__).resolve().parent
-DEFAULT_SCREENPLAY = ROOT / "SAME_SEED.fountain"
+BUILD = ROOT / ".same_seed_render"
+DEFAULT_INPUT = ROOT / "SAME_SEED.fountain"
 DEFAULT_OUTPUT = ROOT / "same_seed_movie.mp4"
-BUILD_DIR = ROOT / ".same_seed_render"
-
-WIDTH = 1920
-HEIGHT = 1080
-FPS = 24
+W, H, FPS = 1920, 1080, 24
 
 VOICE_PREFS = {
     "NARRATOR": ("en-US-ChristopherNeural", "Male"),
@@ -79,12 +72,12 @@ VOICE_PREFS = {
 
 KNOWN_SPEAKERS = {
     "EVAN", "EVAN (O.S.)", "EVAN (CONT'D)", "EVAN TEXT",
-    "CLAIRE", "CLAIRE (CONT'D)", "YOUNG CLAIRE (O.S.)", "YOUNG CLAIRE",
+    "CLAIRE", "CLAIRE (CONT'D)", "YOUNG CLAIRE", "YOUNG CLAIRE (O.S.)",
     "MARA", "MARA (CONT'D)", "MARA (V.O.)", "MARA TEXT",
     "RAY", "RAY (CONT'D)", "RAY VOICE", "RAY VOICE (CONT'D)",
     "JULIAN", "JULIAN (CONT'D)", "JULIAN SYSTEM", "JULIAN SYSTEM (CONT'D)",
     "JULIAN SYSTEM (V.O.)", "JULIAN SYSTEM (VIDEO)",
-    "AI", "AI AGENT", "CAR", "NARRATOR (V.O.)", "NARRATOR",
+    "AI", "AI AGENT", "CAR", "NARRATOR", "NARRATOR (V.O.)",
     "DOCTOR", "YOUNG COWORKER", "YOUNG COWORKER (CONT'D)", "WAITER",
     "COUNSELOR", "ATTORNEY", "STRANGER", "DR. SHAH", "DR. SHAH (CONT'D)",
     "AUDIENCE MEMBER", "DANIEL", "CHILD", "SPEECH THERAPIST",
@@ -107,13 +100,13 @@ class Segment:
     duration: float = 0.0
 
 
-def die(message: str, code: int = 1) -> None:
-    print(f"\nERROR: {message}", file=sys.stderr)
-    raise SystemExit(code)
+def die(msg: str) -> None:
+    print(f"\nERROR: {msg}", file=sys.stderr)
+    raise SystemExit(1)
 
 
-def run(cmd: list[str], *, capture: bool = False) -> subprocess.CompletedProcess:
-    print("$", " ".join(str(x) for x in cmd))
+def run(cmd: list[str], capture: bool = False) -> subprocess.CompletedProcess:
+    print("$", " ".join(map(str, cmd)))
     return subprocess.run(
         cmd,
         check=True,
@@ -123,122 +116,96 @@ def run(cmd: list[str], *, capture: bool = False) -> subprocess.CompletedProcess
     )
 
 
-def ensure_tools() -> None:
-    missing = [name for name in ("ffmpeg", "ffprobe") if shutil.which(name) is None]
+def check_requirements() -> None:
+    missing = [x for x in ("ffmpeg", "ffprobe") if not shutil.which(x)]
     if missing:
-        die(
-            "Missing required command(s): "
-            + ", ".join(missing)
-            + ". Install FFmpeg and ensure ffmpeg/ffprobe are on PATH."
-        )
+        die("Install FFmpeg and put these on PATH: " + ", ".join(missing))
     if edge_tts is None:
-        die("Python package 'edge-tts' is missing. Run: pip install edge-tts pillow")
+        die("Missing edge-tts. Run: python -m pip install -r requirements-render.txt")
     if Image is None:
-        die("Python package 'Pillow' is missing. Run: pip install pillow")
+        die("Missing Pillow. Run: python -m pip install -r requirements-render.txt")
 
 
-def clean_fountain_text(text: str) -> str:
-    text = text.replace("\u2014", " — ")
-    text = text.replace("\u2013", " - ")
-    text = text.replace("\u201c", '"').replace("\u201d", '"')
-    text = text.replace("\u2018", "'").replace("\u2019", "'")
+def clean(text: str) -> str:
+    text = text.replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
+    text = text.replace("–", " - ")
     text = re.sub(r"\*{1,3}([^*]+)\*{1,3}", r"\1", text)
     text = re.sub(r"_([^_]+)_", r"\1", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    return re.sub(r"\s+", " ", text).strip()
 
 
-def spoken_scene_heading(line: str) -> str:
-    s = line.lstrip(".").strip()
-    s = re.sub(r"^INT\./EXT\.", "Interior exterior.", s, flags=re.I)
-    s = re.sub(r"^INT\.", "Interior.", s, flags=re.I)
-    s = re.sub(r"^EXT\.", "Exterior.", s, flags=re.I)
-    s = s.replace(" - ", ". ")
-    return clean_fountain_text(s)
-
-
-def base_speaker(cue: str) -> str:
-    cue = cue.strip()
-    cue = re.sub(r"\s+\((?:O\.S\.|V\.O\.|CONT'D|VIDEO)\)\s*$", "", cue)
+def speaker_base(cue: str) -> str:
+    cue = re.sub(r"\s+\((?:O\.S\.|V\.O\.|CONT'D|VIDEO)\)\s*$", "", cue.strip())
     if cue.endswith(" TEXT"):
         cue = cue[:-5]
     if cue == "RAY VOICE":
         return "RAY"
-    if cue == "NARRATOR":
-        return "NARRATOR"
     return cue
 
 
-def is_speaker_cue(line: str) -> bool:
+def speaker_cue(line: str) -> bool:
     return line.strip() in KNOWN_SPEAKERS
 
 
 def split_long(text: str, limit: int = 900) -> list[str]:
-    text = clean_fountain_text(text)
+    text = clean(text)
+    if not text:
+        return []
     if len(text) <= limit:
-        return [text] if text else []
-
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    out, cur = [], ""
-    for sent in sentences:
-        if len(sent) > limit:
-            pieces = textwrap.wrap(sent, width=limit, break_long_words=False, break_on_hyphens=False)
-        else:
-            pieces = [sent]
-        for piece in pieces:
-            candidate = (cur + " " + piece).strip()
-            if cur and len(candidate) > limit:
-                out.append(cur)
-                cur = piece
+        return [text]
+    pieces, current = [], ""
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        chunks = (
+            textwrap.wrap(sentence, limit, break_long_words=False, break_on_hyphens=False)
+            if len(sentence) > limit else [sentence]
+        )
+        for chunk in chunks:
+            trial = (current + " " + chunk).strip()
+            if current and len(trial) > limit:
+                pieces.append(current)
+                current = chunk
             else:
-                cur = candidate
-    if cur:
-        out.append(cur)
-    return out
+                current = trial
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def scene_spoken(line: str) -> str:
+    s = line.lstrip(".").strip()
+    s = re.sub(r"^INT\./EXT\.", "Interior exterior.", s, flags=re.I)
+    s = re.sub(r"^INT\.", "Interior.", s, flags=re.I)
+    s = re.sub(r"^EXT\.", "Exterior.", s, flags=re.I)
+    return clean(s.replace(" - ", ". "))
 
 
 def parse_screenplay(path: Path) -> list[Segment]:
-    raw_lines = path.read_text(encoding="utf-8").splitlines()
-
-    start = 0
-    for i, line in enumerate(raw_lines):
-        if line.strip() == "===":
-            start = i + 1
-            break
-
-    segments: list[Segment] = []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    start = next((i + 1 for i, x in enumerate(lines) if x.strip() == "==="), 0)
+    out: list[Segment] = []
     scene = ""
+
+    def add(who: str, text: str) -> None:
+        for part in split_long(text):
+            out.append(Segment(len(out), speaker_base(who), part, scene))
+
     i = start
-
-    def add(speaker: str, text: str, current_scene: str) -> None:
-        for piece in split_long(text):
-            if piece:
-                segments.append(
-                    Segment(
-                        index=len(segments),
-                        speaker=base_speaker(speaker),
-                        text=piece,
-                        scene=current_scene,
-                    )
-                )
-
-    while i < len(raw_lines):
-        line = raw_lines[i].strip()
-
+    while i < len(lines):
+        line = lines[i].strip()
         if not line:
             i += 1
             continue
 
         if line.startswith("."):
             scene = line.lstrip(".").strip()
-            add("NARRATOR", spoken_scene_heading(line), scene)
+            add("NARRATOR", scene_spoken(line))
             i += 1
             continue
 
         if line.startswith(">"):
-            directive = clean_fountain_text(line.lstrip(">").strip())
-            if directive and directive not in {"SAME SEED"}:
-                add("NARRATOR", directive, scene)
+            directive = clean(line.lstrip(">").strip())
+            if directive and directive != "SAME SEED":
+                add("NARRATOR", directive)
             i += 1
             continue
 
@@ -246,418 +213,273 @@ def parse_screenplay(path: Path) -> list[Segment]:
             i += 1
             continue
 
-        if is_speaker_cue(line):
+        if speaker_cue(line):
             cue = line
             i += 1
-            parts: list[str] = []
-            while i < len(raw_lines):
-                nxt = raw_lines[i].strip()
-                if not nxt:
-                    break
-                if nxt.startswith(".") or nxt.startswith(">") or nxt.startswith("#") or is_speaker_cue(nxt):
+            parts = []
+            while i < len(lines):
+                nxt = lines[i].strip()
+                if not nxt or nxt.startswith((".", ">", "#")) or speaker_cue(nxt):
                     break
                 if not (nxt.startswith("(") and nxt.endswith(")")):
                     parts.append(nxt)
                 i += 1
             if parts:
-                add(cue, " ".join(parts), scene)
+                add(cue, " ".join(parts))
             continue
 
         parts = [line]
         i += 1
-        while i < len(raw_lines):
-            nxt = raw_lines[i].strip()
-            if (
-                not nxt
-                or nxt.startswith(".")
-                or nxt.startswith(">")
-                or nxt.startswith("#")
-                or is_speaker_cue(nxt)
-            ):
+        while i < len(lines):
+            nxt = lines[i].strip()
+            if not nxt or nxt.startswith((".", ">", "#")) or speaker_cue(nxt):
                 break
             parts.append(nxt)
             i += 1
-        add("NARRATOR", " ".join(parts), scene)
+        add("NARRATOR", " ".join(parts))
 
-    segments.insert(
-        0,
-        Segment(index=0, speaker="NARRATOR", text="Same Seed.", scene="SAME SEED"),
-    )
-    for idx, seg in enumerate(segments):
-        seg.index = idx
-    return segments
+    out.insert(0, Segment(0, "NARRATOR", "Same Seed.", "SAME SEED"))
+    for n, seg in enumerate(out):
+        seg.index = n
+    return out
 
 
-async def available_voices() -> list[dict]:
-    return await edge_tts.list_voices()
-
-
-async def resolve_voice_map(speakers: Iterable[str]) -> dict[str, str]:
-    voices = await available_voices()
+async def resolve_voices(speakers: Iterable[str]) -> dict[str, str]:
+    voices = await edge_tts.list_voices()
     names = {v["ShortName"] for v in voices}
-    en_us = [v for v in voices if v.get("Locale") == "en-US"]
-    any_en = [v for v in voices if str(v.get("Locale", "")).startswith("en-")]
+    pools = [
+        [v for v in voices if v.get("Locale") == "en-US"],
+        [v for v in voices if str(v.get("Locale", "")).startswith("en-")],
+        voices,
+    ]
 
     def fallback(gender: str) -> str:
-        for pool in (en_us, any_en, voices):
+        for pool in pools:
             for v in pool:
                 if v.get("Gender") == gender:
                     return v["ShortName"]
         return voices[0]["ShortName"]
 
-    resolved: dict[str, str] = {}
-    for speaker in sorted(set(speakers)):
-        pref, gender = VOICE_PREFS.get(speaker, VOICE_PREFS["NARRATOR"])
-        resolved[speaker] = pref if pref in names else fallback(gender)
-    return resolved
+    result = {}
+    for who in sorted(set(speakers)):
+        preferred, gender = VOICE_PREFS.get(who, VOICE_PREFS["NARRATOR"])
+        result[who] = preferred if preferred in names else fallback(gender)
+    return result
 
 
-def cache_key(seg: Segment, rate: str) -> str:
-    payload = f"{seg.voice}\0{rate}\0{seg.text}".encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()[:20]
+def key_for(seg: Segment, rate: str) -> str:
+    raw = f"{seg.voice}\0{rate}\0{seg.text}".encode()
+    return hashlib.sha256(raw).hexdigest()[:20]
 
 
-async def synthesize_one(seg: Segment, path: Path, rate: str, retries: int = 4) -> None:
+async def speak_one(seg: Segment, path: Path, rate: str) -> None:
     if path.exists() and path.stat().st_size > 1024:
         return
-    last_error = None
-    for attempt in range(1, retries + 1):
+    last = None
+    for attempt in range(1, 5):
         try:
-            communicate = edge_tts.Communicate(seg.text, seg.voice, rate=rate)
-            await communicate.save(str(path))
-            if path.exists() and path.stat().st_size > 1024:
+            await edge_tts.Communicate(seg.text, seg.voice, rate=rate).save(str(path))
+            if path.stat().st_size > 1024:
                 return
-            raise RuntimeError("TTS returned an empty/tiny audio file")
+            raise RuntimeError("tiny/empty TTS result")
         except Exception as exc:
-            last_error = exc
-            if path.exists():
-                path.unlink(missing_ok=True)
-            print(f"TTS retry {attempt}/{retries} for segment {seg.index}: {exc}")
-            await asyncio.sleep(min(8, attempt * 2))
-    raise RuntimeError(f"TTS failed for segment {seg.index}: {last_error}")
+            last = exc
+            path.unlink(missing_ok=True)
+            print(f"TTS retry {attempt}/4 on segment {seg.index}: {exc}")
+            await asyncio.sleep(attempt * 2)
+    raise RuntimeError(f"TTS failed on segment {seg.index}: {last}")
 
 
-async def synthesize_all(
-    segments: list[Segment],
-    audio_dir: Path,
-    rate: str,
-    concurrency: int,
-) -> None:
-    sem = asyncio.Semaphore(concurrency)
+async def speak_all(segments: list[Segment], audio_dir: Path, rate: str, jobs: int) -> None:
+    sem = asyncio.Semaphore(max(1, jobs))
 
     async def worker(seg: Segment) -> None:
-        key = cache_key(seg, rate)
-        path = audio_dir / f"{seg.index:05d}_{key}.mp3"
+        path = audio_dir / f"{seg.index:05d}_{key_for(seg, rate)}.mp3"
         seg.audio_file = str(path)
         async with sem:
-            print(f"[{seg.index + 1}/{len(segments)}] {seg.speaker}: {seg.text[:80]}")
-            await synthesize_one(seg, path, rate)
+            print(f"[{seg.index+1}/{len(segments)}] {seg.speaker}: {seg.text[:75]}")
+            await speak_one(seg, path, rate)
 
-    await asyncio.gather(*(worker(seg) for seg in segments))
+    await asyncio.gather(*(worker(s) for s in segments))
 
 
-def duration_seconds(path: Path) -> float:
-    cp = run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
-        capture=True,
-    )
+def probe_duration(path: Path) -> float:
+    cp = run([
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", str(path)
+    ], capture=True)
     return float(cp.stdout.strip())
 
 
-def srt_timestamp(seconds: float) -> str:
-    ms = max(0, int(round(seconds * 1000)))
-    h, rem = divmod(ms, 3_600_000)
-    m, rem = divmod(rem, 60_000)
-    s, milli = divmod(rem, 1000)
-    return f"{h:02d}:{m:02d}:{s:02d},{milli:03d}"
-
-
-def subtitle_text(seg: Segment) -> str:
-    if seg.speaker == "NARRATOR":
-        body = seg.text
-    else:
-        body = f"{seg.speaker}: {seg.text}"
-    return "\n".join(textwrap.wrap(body, width=74, break_long_words=False))
+def stamp(seconds: float) -> str:
+    ms = max(0, round(seconds * 1000))
+    h, r = divmod(ms, 3_600_000)
+    m, r = divmod(r, 60_000)
+    s, x = divmod(r, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{x:03d}"
 
 
 def write_srt(segments: list[Segment], path: Path) -> float:
-    t = 0.0
-    lines: list[str] = []
-    for idx, seg in enumerate(segments, 1):
-        start = t
-        end = t + max(seg.duration, 0.25)
-        lines.extend(
-            [
-                str(idx),
-                f"{srt_timestamp(start)} --> {srt_timestamp(end)}",
-                subtitle_text(seg),
-                "",
-            ]
-        )
-        t = end
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return t
+    now = 0.0
+    rows = []
+    for n, seg in enumerate(segments, 1):
+        end = now + max(seg.duration, 0.25)
+        body = seg.text if seg.speaker == "NARRATOR" else f"{seg.speaker}: {seg.text}"
+        body = "\n".join(textwrap.wrap(body, 74, break_long_words=False))
+        rows += [str(n), f"{stamp(now)} --> {stamp(end)}", body, ""]
+        now = end
+    path.write_text("\n".join(rows), encoding="utf-8")
+    return now
 
 
-def ffconcat_quote(path: Path) -> str:
-    return str(path.resolve()).replace("'", r"'\''")
+def concat_path(path: Path) -> str:
+    return path.resolve().as_posix().replace("'", r"'\''")
 
 
-def concat_audio(segments: list[Segment], work: Path, out: Path) -> None:
-    concat_file = work / "audio_concat.txt"
-    concat_file.write_text(
-        "\n".join(f"file '{ffconcat_quote(Path(seg.audio_file))}'" for seg in segments) + "\n",
+def concat_audio(segments: list[Segment], out: Path) -> None:
+    listing = BUILD / "audio_concat.txt"
+    listing.write_text(
+        "\n".join(f"file '{concat_path(Path(s.audio_file))}'" for s in segments) + "\n",
         encoding="utf-8",
     )
-    run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_file),
-            "-vn",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "160k",
-            "-ar",
-            "48000",
-            str(out),
-        ]
-    )
+    run([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(listing),
+        "-vn", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", str(out)
+    ])
 
 
-def find_font() -> str | None:
-    candidates = [
-        ROOT / "DejaVuSans.ttf",
+def font_file() -> str | None:
+    for p in (
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
         Path("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"),
         Path("C:/Windows/Fonts/arial.ttf"),
         Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
-    ]
-    for p in candidates:
+    ):
         if p.exists():
             return str(p)
     return None
 
 
-def create_background(path: Path) -> None:
-    img = Image.new("RGB", (WIDTH, HEIGHT), (9, 11, 16))
-    draw = ImageDraw.Draw(img)
+def background(path: Path) -> None:
+    img = Image.new("RGB", (W, H), (9, 11, 16))
+    d = ImageDraw.Draw(img)
+    for y in range(H):
+        v = int(9 + 14 * y / H)
+        d.line((0, y, W, y), fill=(v, v + 2, v + 8))
 
-    for y in range(HEIGHT):
-        v = int(9 + 14 * (y / HEIGHT))
-        draw.line([(0, y), (WIDTH, y)], fill=(v, v + 2, v + 8))
+    f = font_file()
+    title = ImageFont.truetype(f, 94) if f else ImageFont.load_default()
+    sub = ImageFont.truetype(f, 34) if f else ImageFont.load_default()
+    foot = ImageFont.truetype(f, 25) if f else ImageFont.load_default()
 
-    font_path = find_font()
-    if font_path:
-        title_font = ImageFont.truetype(font_path, 94)
-        sub_font = ImageFont.truetype(font_path, 34)
-        tiny_font = ImageFont.truetype(font_path, 25)
-    else:
-        title_font = sub_font = tiny_font = ImageFont.load_default()
+    def centered(text: str, y: int, font, fill) -> None:
+        box = d.textbbox((0, 0), text, font=font)
+        d.text(((W - (box[2] - box[0])) / 2, y), text, font=font, fill=fill)
 
-    title = "SAME SEED"
-    bbox = draw.textbbox((0, 0), title, font=title_font)
-    tw = bbox[2] - bbox[0]
-    draw.text(((WIDTH - tw) / 2, 235), title, font=title_font, fill=(238, 240, 245))
-
-    subtitle = "an original feature screenplay — narrated edition"
-    bbox = draw.textbbox((0, 0), subtitle, font=sub_font)
-    sw = bbox[2] - bbox[0]
-    draw.text(((WIDTH - sw) / 2, 355), subtitle, font=sub_font, fill=(180, 187, 202))
-
-    footer = "The screenplay text appears as timed captions."
-    bbox = draw.textbbox((0, 0), footer, font=tiny_font)
-    fw = bbox[2] - bbox[0]
-    draw.text(((WIDTH - fw) / 2, 965), footer, font=tiny_font, fill=(110, 118, 135))
-
-    img.save(path, quality=95)
+    centered("SAME SEED", 235, title, (238, 240, 245))
+    centered("an original feature screenplay — narrated edition", 355, sub, (180, 187, 202))
+    centered("The screenplay text appears as timed captions.", 965, foot, (110, 118, 135))
+    img.save(path)
 
 
-def ffmpeg_subtitle_path(path: Path) -> str:
-    s = str(path.resolve()).replace("\\", "/")
-    s = s.replace(":", r"\:")
-    s = s.replace("'", r"\'")
-    return s
+def subtitle_filter_path(path: Path) -> str:
+    return path.resolve().as_posix().replace(":", r"\:").replace("'", r"\'")
 
 
-def render_video(background: Path, audio: Path, srt: Path, output: Path) -> None:
-    sub_path = ffmpeg_subtitle_path(srt)
+def render_video(bg: Path, audio: Path, srt: Path, out: Path) -> None:
     vf = (
-        f"subtitles='{sub_path}':"
+        f"subtitles='{subtitle_filter_path(srt)}':"
         "force_style='FontName=Arial,FontSize=30,"
         "PrimaryColour=&H00F4F4F4,OutlineColour=&H00101010,"
         "BorderStyle=3,Outline=1,Shadow=0,MarginV=72,Alignment=2'"
     )
-
-    run(
-        [
-            "ffmpeg",
-            "-y",
-            "-loop",
-            "1",
-            "-framerate",
-            str(FPS),
-            "-i",
-            str(background),
-            "-i",
-            str(audio),
-            "-vf",
-            vf,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "20",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "160k",
-            "-ar",
-            "48000",
-            "-shortest",
-            "-movflags",
-            "+faststart",
-            str(output),
-        ]
-    )
+    run([
+        "ffmpeg", "-y", "-loop", "1", "-framerate", str(FPS), "-i", str(bg),
+        "-i", str(audio), "-vf", vf, "-c:v", "libx264",
+        "-preset", "veryfast", "-tune", "stillimage", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
+        "-shortest", "-movflags", "+faststart", str(out)
+    ])
 
 
-def write_manifest(segments: list[Segment], path: Path) -> None:
-    path.write_text(
-        json.dumps([asdict(s) for s in segments], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+async def build(args: argparse.Namespace) -> None:
+    check_requirements()
+    source = Path(args.input).resolve()
+    out = Path(args.output).resolve()
+    if not source.exists():
+        die(f"Screenplay not found: {source}")
+    out.parent.mkdir(parents=True, exist_ok=True)
 
-
-async def async_main(args: argparse.Namespace) -> None:
-    ensure_tools()
-
-    screenplay = Path(args.input).resolve()
-    output = Path(args.output).resolve()
-    if not screenplay.exists():
-        die(f"Screenplay not found: {screenplay}")
-
-    BUILD_DIR.mkdir(exist_ok=True)
-    audio_dir = BUILD_DIR / "tts"
+    BUILD.mkdir(exist_ok=True)
+    audio_dir = BUILD / "tts"
+    if args.force and audio_dir.exists():
+        shutil.rmtree(audio_dir)
     audio_dir.mkdir(exist_ok=True)
 
-    if args.force and audio_dir.exists():
-        print("Force mode: deleting cached TTS files.")
-        shutil.rmtree(audio_dir)
-        audio_dir.mkdir(exist_ok=True)
-
-    segments = parse_screenplay(screenplay)
+    segments = parse_screenplay(source)
     if args.preview:
-        segments = segments[: args.preview]
-
+        segments = segments[:args.preview]
     print(f"Parsed {len(segments)} spoken segments.")
 
-    voice_map = await resolve_voice_map(s.speaker for s in segments)
-    print("\nVoice map:")
-    for speaker, voice in sorted(voice_map.items()):
-        print(f"  {speaker:18s} -> {voice}")
-
+    mapping = await resolve_voices(s.speaker for s in segments)
+    for who, voice in sorted(mapping.items()):
+        print(f"  {who:18s} -> {voice}")
     for seg in segments:
-        seg.voice = voice_map.get(seg.speaker, voice_map["NARRATOR"])
+        seg.voice = mapping.get(seg.speaker, mapping["NARRATOR"])
 
-    await synthesize_all(
-        segments,
-        audio_dir=audio_dir,
-        rate=args.rate,
-        concurrency=max(1, args.concurrency),
-    )
+    await speak_all(segments, audio_dir, args.rate, args.concurrency)
 
-    print("\nProbing durations...")
     for n, seg in enumerate(segments, 1):
-        seg.duration = duration_seconds(Path(seg.audio_file))
+        seg.duration = probe_duration(Path(seg.audio_file))
         if n % 50 == 0 or n == len(segments):
-            print(f"  {n}/{len(segments)}")
+            print(f"Durations: {n}/{len(segments)}")
 
-    srt = output.with_suffix(".srt")
-    total = write_srt(segments, srt)
-    write_manifest(segments, BUILD_DIR / "manifest.json")
-    print(f"Estimated runtime: {total / 3600:.2f} hours")
-    print(f"Subtitles: {srt}")
+    srt = out.with_suffix(".srt")
+    runtime = write_srt(segments, srt)
+    (BUILD / "manifest.json").write_text(
+        json.dumps([asdict(x) for x in segments], indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    print(f"Runtime: {runtime / 3600:.2f} hours")
 
-    audio = BUILD_DIR / "same_seed_audio.m4a"
-    concat_audio(segments, BUILD_DIR, audio)
-
-    background = BUILD_DIR / "background.png"
-    create_background(background)
+    audio = BUILD / "same_seed_audio.m4a"
+    concat_audio(segments, audio)
 
     if args.audio_only:
-        target = output.with_suffix(".m4a")
+        target = out.with_suffix(".m4a")
         shutil.copy2(audio, target)
-        print(f"\nDONE: {target}")
+        print(f"DONE: {target}")
+        print(f"SRT:  {srt}")
         return
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    render_video(background, audio, srt, output)
-    print(f"\nDONE: {output}")
+    bg = BUILD / "background.png"
+    background(bg)
+    render_video(bg, audio, srt, out)
+    print(f"DONE: {out}")
     print(f"SRT:  {srt}")
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Narrate SAME SEED and render a YouTube-ready MP4.")
-    p.add_argument("--input", default=str(DEFAULT_SCREENPLAY), help="Input Fountain screenplay.")
-    p.add_argument("--output", default=str(DEFAULT_OUTPUT), help="Output MP4 path.")
-    p.add_argument(
-        "--rate",
-        default="+3%",
-        help="edge-tts speech rate, e.g. '+3%%', '-5%%'. Default: +3%%",
-    )
-    p.add_argument(
-        "--concurrency",
-        type=int,
-        default=3,
-        help="Number of simultaneous TTS requests. Default: 3",
-    )
-    p.add_argument(
-        "--preview",
-        type=int,
-        default=0,
-        help="Render only the first N spoken segments for a quick test.",
-    )
-    p.add_argument(
-        "--force",
-        action="store_true",
-        help="Delete cached TTS and regenerate everything.",
-    )
-    p.add_argument(
-        "--audio-only",
-        action="store_true",
-        help="Stop after producing the full narrated M4A + SRT.",
-    )
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Render SAME SEED as a narrated YouTube-ready MP4.")
+    p.add_argument("--input", default=str(DEFAULT_INPUT))
+    p.add_argument("--output", default=str(DEFAULT_OUTPUT))
+    p.add_argument("--rate", default="+3%", help="edge-tts rate, e.g. +3%% or -5%%")
+    p.add_argument("--concurrency", type=int, default=3)
+    p.add_argument("--preview", type=int, default=0, help="only render first N spoken segments")
+    p.add_argument("--force", action="store_true", help="regenerate cached TTS")
+    p.add_argument("--audio-only", action="store_true")
     return p
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    args = parser().parse_args()
     try:
-        asyncio.run(async_main(args))
+        asyncio.run(build(args))
     except KeyboardInterrupt:
-        print("\nInterrupted. Cached TTS remains in .same_seed_render/; rerun to resume.")
+        print("\nInterrupted. Re-run the same command to resume from cached TTS.")
         raise SystemExit(130)
     except subprocess.CalledProcessError as exc:
-        die(f"External command failed with exit code {exc.returncode}: {exc.cmd}")
+        die(f"Command failed ({exc.returncode}): {exc.cmd}")
 
 
 if __name__ == "__main__":
