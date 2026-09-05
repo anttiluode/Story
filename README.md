@@ -31,7 +31,7 @@ Install Python dependencies:
 python -m pip install -r requirements-render.txt
 ```
 
-Install **FFmpeg** separately and make sure both `ffmpeg` and `ffprobe` are available on your PATH.
+Install **FFmpeg** separately and make sure `ffmpeg` is available on your PATH.
 
 ### Test it first
 
@@ -54,7 +54,9 @@ same_seed_movie.mp4
 same_seed_movie.srt
 ```
 
-The hidden `.same_seed_render/` directory contains cached TTS segments and the intermediate soundtrack. If the process is interrupted, run the same command again and it will reuse completed speech. Use `python render_movie.py --force` only if you deliberately want to regenerate every voice segment.
+The hidden `.same_seed_render/` directory contains cached TTS segments and the intermediate soundtrack. If the process is interrupted, run the same command again and it will reuse completed speech. **Do not delete this directory when updating the renderer.** Use `python render_movie.py --force` only if you deliberately want to regenerate every voice segment.
+
+If you started a render with an older version of the script, update the repo, reinstall the small Python dependency set, and run the same command again. Cached speech is keyed by voice and text, so unchanged clips are reused.
 
 You can also make only the narration soundtrack first:
 
@@ -62,7 +64,7 @@ You can also make only the narration soundtrack first:
 python render_movie.py --audio-only
 ```
 
-`edge-tts` requires an internet connection while the voices are being generated. The actual video encoding is local through FFmpeg.
+`edge-tts` requires an internet connection while the voices are being generated. MP3 durations are read locally with `mutagen`; the final audio/video assembly is local through FFmpeg.
 
 The story begins as domestic drama and only gradually becomes speculative science fiction. AI is not the villain, the savior, or the cause of the protagonist's suffering. It is background pressure: a sequence of increasingly persuasive demonstrations that information, memory, perception, imagination, and identity may be less separate than people assumed.
 
