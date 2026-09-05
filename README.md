@@ -2,6 +2,12 @@
 
 A feature screenplay about an ordinary man who happens to live through the moment when artificial intelligence makes the nature of intelligence itself difficult to ignore.
 
+## Read the screenplay
+
+**[Read the complete screenplay — `SAME_SEED.fountain`](./SAME_SEED.fountain)**
+
+The root Fountain file contains the entire feature in one document. The numbered files under `screenplay/` remain the gate-by-gate source chapters for editing and expansion.
+
 The story begins as domestic drama and only gradually becomes speculative science fiction. AI is not the villain, the savior, or the cause of the protagonist's suffering. It is background pressure: a sequence of increasingly persuasive demonstrations that information, memory, perception, imagination, and identity may be less separate than people assumed.
 
 The protagonist is fictional. His life is deliberately ordinary: work, marriage, parenthood, divorce, illness around him, aging, friendships, hobby projects, bad sleep, cheap computers, hospital rooms, and the stubborn human tendency to keep going.
@@ -12,7 +18,8 @@ The screenplay is developed like an experimental program:
 
 1. `STORY_BIBLE.md` — characters, rules, motifs, tone, ending logic.
 2. `GATES.md` — dramatic gates. Each gate has a condition that must be earned before the story is allowed to escalate.
-3. `screenplay/` — the actual feature, written in Fountain-compatible plain text. Read the numbered files in order.
+3. `screenplay/` — the chapter-by-chapter source, written in Fountain-compatible plain text.
+4. `SAME_SEED.fountain` — the complete assembled feature screenplay in one file.
 
 The core rule is simple: **no cosmic claim is allowed to arrive before the human story has paid for it.**
 
