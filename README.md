@@ -8,6 +8,62 @@ A feature screenplay about an ordinary man who happens to live through the momen
 
 The root Fountain file contains the entire feature in one document. The numbered files under `screenplay/` remain the gate-by-gate source chapters for editing and expansion.
 
+## Render the whole screenplay as an MP4
+
+`render_movie.py` turns the complete screenplay into a narrated 1080p audio-film suitable for uploading to YouTube.
+
+It:
+
+- reads `SAME_SEED.fountain`;
+- narrates all action and scene text;
+- gives Evan, Claire, Mara, Ray, Julian, the AI and several other characters different TTS voices;
+- caches every spoken segment so an interrupted feature-length render can resume;
+- creates a timed `.srt` subtitle file;
+- concatenates the full soundtrack;
+- burns the screenplay text over a clean 1920×1080 title background;
+- outputs H.264/AAC `same_seed_movie.mp4` with `+faststart` for normal web/YouTube playback.
+
+### Requirements
+
+Install Python dependencies:
+
+```bash
+python -m pip install -r requirements-render.txt
+```
+
+Install **FFmpeg** separately and make sure both `ffmpeg` and `ffprobe` are available on your PATH.
+
+### Test it first
+
+Render only the first 40 spoken segments:
+
+```bash
+python render_movie.py --preview 40 --output same_seed_preview.mp4
+```
+
+### Render the full movie
+
+```bash
+python render_movie.py
+```
+
+The final files will be:
+
+```text
+same_seed_movie.mp4
+same_seed_movie.srt
+```
+
+The hidden `.same_seed_render/` directory contains cached TTS segments and the intermediate soundtrack. If the process is interrupted, run the same command again and it will reuse completed speech. Use `python render_movie.py --force` only if you deliberately want to regenerate every voice segment.
+
+You can also make only the narration soundtrack first:
+
+```bash
+python render_movie.py --audio-only
+```
+
+`edge-tts` requires an internet connection while the voices are being generated. The actual video encoding is local through FFmpeg.
+
 The story begins as domestic drama and only gradually becomes speculative science fiction. AI is not the villain, the savior, or the cause of the protagonist's suffering. It is background pressure: a sequence of increasingly persuasive demonstrations that information, memory, perception, imagination, and identity may be less separate than people assumed.
 
 The protagonist is fictional. His life is deliberately ordinary: work, marriage, parenthood, divorce, illness around him, aging, friendships, hobby projects, bad sleep, cheap computers, hospital rooms, and the stubborn human tendency to keep going.
