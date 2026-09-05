@@ -1,0 +1,6 @@
+.same_seed_render/
+same_seed_movie.mp4
+same_seed_movie.m4a
+same_seed_movie.srt
+__pycache__/
+*.pyc
