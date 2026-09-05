@@ -1,5 +1,9 @@
 # SAME SEED
 
+The prompt was: 
+
+https://github.com/anttiluode/Story/blob/main/prompt.txt after which ChatGPT sol wrote the story in pieces and I asked it to combine it. 
+
 A feature screenplay about an ordinary man who happens to live through the moment when artificial intelligence makes the nature of intelligence itself difficult to ignore.
 
 ## Read the screenplay
