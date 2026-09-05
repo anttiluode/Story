@@ -349,7 +349,7 @@ def concat_audio(segments: list[Segment], out: Path) -> None:
     )
     run([
         "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(listing),
-        "-vn", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", str(out)
+        "-vn", "-c:a", "aac", "-strict", "-2", "-b:a", "160k", "-ar", "48000", str(out)
     ])
 
 
@@ -392,17 +392,15 @@ def subtitle_filter_path(path: Path) -> str:
 
 
 def render_video(bg: Path, audio: Path, srt: Path, out: Path) -> None:
-    vf = (
-        f"subtitles='{subtitle_filter_path(srt)}':"
-        "force_style='FontName=Arial,FontSize=30,"
-        "PrimaryColour=&H00F4F4F4,OutlineColour=&H00101010,"
-        "BorderStyle=3,Outline=1,Shadow=0,MarginV=72,Alignment=2'"
-    )
+    # Keep the filter deliberately simple: very old FFmpeg/libass builds may not
+    # understand modern force_style options, but can still render ordinary SRT.
+    vf = f"subtitles='{subtitle_filter_path(srt)}'"
     run([
         "ffmpeg", "-y", "-loop", "1", "-framerate", str(FPS), "-i", str(bg),
         "-i", str(audio), "-vf", vf, "-c:v", "libx264",
         "-preset", "veryfast", "-tune", "stillimage", "-crf", "20",
-        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-strict", "-2",
+        "-b:a", "160k", "-ar", "48000",
         "-shortest", "-movflags", "+faststart", str(out)
     ])
 
