@@ -7,7 +7,7 @@ action text, creates SRT subtitles, and renders a 1080p H.264/AAC MP4.
 
 Install:
     python -m pip install -r requirements-render.txt
-    # also install ffmpeg so ffmpeg + ffprobe are on PATH
+    # also install ffmpeg so ffmpeg is on PATH
 
 Try a preview:
     python render_movie.py --preview 40 --output same_seed_preview.mp4
@@ -41,6 +41,11 @@ try:
 except ImportError:
     Image = ImageDraw = ImageFont = None
 
+try:
+    from mutagen.mp3 import MP3
+except ImportError:
+    MP3 = None
+
 ROOT = Path(__file__).resolve().parent
 BUILD = ROOT / ".same_seed_render"
 DEFAULT_INPUT = ROOT / "SAME_SEED.fountain"
@@ -53,6 +58,7 @@ VOICE_PREFS = {
     "CLAIRE": ("en-US-JennyNeural", "Female"),
     "YOUNG CLAIRE": ("en-US-AriaNeural", "Female"),
     "MARA": ("en-US-AriaNeural", "Female"),
+    "DIANE": ("en-US-JennyNeural", "Female"),
     "RAY": ("en-US-DavisNeural", "Male"),
     "JULIAN": ("en-US-EricNeural", "Male"),
     "JULIAN SYSTEM": ("en-US-AndrewNeural", "Male"),
@@ -74,6 +80,7 @@ KNOWN_SPEAKERS = {
     "EVAN", "EVAN (O.S.)", "EVAN (CONT'D)", "EVAN TEXT",
     "CLAIRE", "CLAIRE (CONT'D)", "YOUNG CLAIRE", "YOUNG CLAIRE (O.S.)",
     "MARA", "MARA (CONT'D)", "MARA (V.O.)", "MARA TEXT",
+    "DIANE",
     "RAY", "RAY (CONT'D)", "RAY VOICE", "RAY VOICE (CONT'D)",
     "JULIAN", "JULIAN (CONT'D)", "JULIAN SYSTEM", "JULIAN SYSTEM (CONT'D)",
     "JULIAN SYSTEM (V.O.)", "JULIAN SYSTEM (VIDEO)",
@@ -117,13 +124,14 @@ def run(cmd: list[str], capture: bool = False) -> subprocess.CompletedProcess:
 
 
 def check_requirements() -> None:
-    missing = [x for x in ("ffmpeg", "ffprobe") if not shutil.which(x)]
-    if missing:
-        die("Install FFmpeg and put these on PATH: " + ", ".join(missing))
+    if not shutil.which("ffmpeg"):
+        die("Install FFmpeg and put ffmpeg on PATH.")
     if edge_tts is None:
         die("Missing edge-tts. Run: python -m pip install -r requirements-render.txt")
     if Image is None:
         die("Missing Pillow. Run: python -m pip install -r requirements-render.txt")
+    if MP3 is None:
+        die("Missing mutagen. Run: python -m pip install -r requirements-render.txt")
 
 
 def clean(text: str) -> str:
@@ -304,11 +312,8 @@ async def speak_all(segments: list[Segment], audio_dir: Path, rate: str, jobs: i
 
 
 def probe_duration(path: Path) -> float:
-    cp = run([
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1", str(path)
-    ], capture=True)
-    return float(cp.stdout.strip())
+    """Read an MP3 duration directly instead of spawning ffprobe thousands of times."""
+    return float(MP3(str(path)).info.length)
 
 
 def stamp(seconds: float) -> str:
@@ -431,7 +436,7 @@ async def build(args: argparse.Namespace) -> None:
 
     for n, seg in enumerate(segments, 1):
         seg.duration = probe_duration(Path(seg.audio_file))
-        if n % 50 == 0 or n == len(segments):
+        if n % 250 == 0 or n == len(segments):
             print(f"Durations: {n}/{len(segments)}")
 
     srt = out.with_suffix(".srt")
